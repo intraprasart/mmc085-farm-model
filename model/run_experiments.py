@@ -8,8 +8,8 @@
    จัดอันดับด้วยความมั่งคั่ง W60 = เงินสด + มูลค่ายุ้งข้าว
    วิธีรัน: python run_experiments.py"""
 import json
-from farm_model import (simulate, invest0, lab, a_house, P_PADDY,
-                      SCEN6, SCEN10, DOUBLES, TOTAL, BUDGET)
+from farm_model import (simulate, invest0, lab, a_house, P_PADDY, Y_RICE,
+                      HH_RICE_MO, CK_RICE_MO, SCEN6, SCEN10, DOUBLES, TOTAL, BUDGET)
 
 def evaluate(A_P, A_R, A_F, A_G, n_ck=0, rho=0.0, thR=0.0, thG=0.0,
              scens=SCEN10, w_rice=None):
@@ -22,6 +22,39 @@ def evaluate(A_P, A_R, A_F, A_G, n_ck=0, rho=0.0, thR=0.0, thG=0.0,
         out[sc] = s
     return dict(normal=out[()], all=out,
                 worstV=min(s["minV"] for sc, s in out.items() if sc))
+
+import farm_model as MV
+
+# ชุดการรบกวนข้อสมมติฝั่งที่เป็นคุณต่อน้ำ ใช้เป็นเงื่อนไขบังคับในการคัดแบบ
+PERTS = [("ฐาน (kp=0.70, c=0.30)", {}), ("kp=0.75", dict(kp=0.75)), ("kp=0.80", dict(kp=0.80)),
+         ("c=0.25", dict(c=0.25)), ("c=0.20", dict(c=0.20)), ("ฝนทุกเดือน -10%", dict(rainf=0.9))]
+
+def robust(a, n, rho, thR, thG, kp=None, c=None, rainf=1.0):
+    """คืน (รอดครบ 10 ฉากหรือไม่, กันชนน้ำต่ำสุดในฉากแล้ง) เมื่อรบกวนข้อสมมติ"""
+    old = (MV.KP, MV.RUNOFF_C, list(MV.RAIN_N), list(MV.RAIN_D))
+    if kp: MV.KP = kp
+    if c is not None: MV.RUNOFF_C = c
+    if rainf != 1.0:
+        MV.RAIN_N[:] = [x * rainf for x in old[2]]
+        MV.RAIN_D[:] = [x * rainf for x in old[3]]
+    wv, ok = 1e9, True
+    for sc in SCEN10:
+        sim = simulate(*a, n, rho, thR, thG, drought=sc)
+        if not sim["feasible"]:
+            ok = False
+        if sc:
+            wv = min(wv, sim["minV"])
+    MV.KP, MV.RUNOFF_C = old[0], old[1]
+    MV.RAIN_N[:], MV.RAIN_D[:] = old[2], old[3]
+    return ok, (None if wv > 1e8 else wv)
+
+def feed_self_reliant(A_R, n):
+    """C12 ผลผลิตข้าวหนึ่งปีต้องพอทั้งคนกินและไก่เบิก ไก่จึงไม่ต้องพึ่งอาหารสำเร็จเป็นหลัก"""
+    return Y_RICE * A_R >= 12.0 * (HH_RICE_MO + CK_RICE_MO * n)
+
+def survives_all(a, n, rho, thR, thG):
+    """แบบที่ยอมรับได้ต้องรอดทุกฉากในทุกการรบกวน ไม่ใช่แค่ที่ค่าฐาน"""
+    return all(robust(a, n, rho, thR, thG, **kw)[0] for _, kw in PERTS)
 
 J = {}
 print("=" * 104)
@@ -102,15 +135,23 @@ J["m2"] = dict(th=[thR2, thG2],
 
 print()
 print("=" * 104)
-print("S3 | เพดานแรงงาน (C9: ผัก<=1,600) + เกณฑ์ครบ -> แบบแนะนำ (จัดอันดับ W60; ซื้อข้าวปกติต้อง = 0)")
+print("S3 | เงื่อนไขครบ C1-C12 + ความทนทานเป็นเงื่อนไขบังคับ -> แบบแนะนำ")
 print("=" * 104)
 cand = []
-for n_ck in (40, 60):
+# ตะแกรงจำนวนไก่เริ่มที่ 10 ตัว เพราะ C13 ความพอเพียงด้านไข่ 22.5n >= 120 ฟอง/เดือน -> n >= 6
+for n_ck in (10, 20, 30, 40, 50, 60):
     AH = a_house(n_ck)
-    for A_P in (640.0, 800.0, 960.0, 1120.0, 1280.0, 1440.0, 1600.0, 1920.0):
+    for A_P in (640.0, 800.0, 960.0, 1120.0, 1280.0, 1440.0, 1600.0, 1760.0,
+                1920.0, 2080.0, 2240.0, 2400.0, 2560.0, 2720.0):
         for A_G in (1280.0, 1440.0, 1600.0):
             for A_F in (0.0, 320.0, 640.0, 960.0, 1280.0):
                 A_R = TOTAL - AH - A_P - A_G - A_F
+                # C11 ความหลากหลายของอาหาร: ต้องมีไม้ผลอย่างน้อย 5% ของที่ดิน
+                # เป็นข้อจำกัดเชิงคุณค่าแบบเดียวกับ C7 (ข้าวพอกิน) ราคาที่จ่ายวัดไว้ใน S5
+                if A_F < 320.0:
+                    continue
+                if not feed_self_reliant(A_R, n_ck):      # C12
+                    continue
                 if A_R < 1600 or invest0(A_P, A_R, A_F, A_G) > BUDGET:
                     continue
                 for rho in (1.0, 2.0):
@@ -122,24 +163,30 @@ for n_ck in (40, 60):
                         continue
                     cand.append((n["wealth"], A_P, A_R, A_F, A_G, n_ck, rho, r))
 cand.sort(key=lambda x: -x[0])
-print(f"  ผ่านครบเกณฑ์ {len(cand)} แบบ | 5 อันดับแรก:")
-for W, P, R, F, G, nc, rh, r in cand[:5]:
-    print(f"    {lab(P,R,F,G,a_house(nc))} ไก่{nc} ปลา{rh:.0f} | W60={W:>11,.0f} กันชน={r['worstV']:>6,.0f}")
-best_W = cand[0][0]
-pool = [x for x in cand if x[0] >= 0.99 * best_W]
-pick = max(pool, key=lambda x: (x[3] > 0, x[7]["worstV"]))
+print(f"  ผ่านเงื่อนไข C1-C12 ที่ค่าฐาน {len(cand):,} แบบ | 6 อันดับแรกด้วยความมั่งคั่ง:")
+# ความทนทานเป็นเงื่อนไขบังคับ ไม่ใช่เกณฑ์รอง แบบที่ล่มเมื่อข้อสมมติคลาดไปหนึ่งขั้นถือว่าใช้ไม่ได้
+ROBN = 40
+rob = [survives_all((x[1], x[2], x[3], x[4]), x[5], x[6], thR2, thG2) for x in cand[:ROBN]]
+for i, x in enumerate(cand[:6]):
+    W, P, R, F, G, nc, rh, r = x
+    print(f"    {lab(P,R,F,G,a_house(nc))} ไก่{nc} ปลา{rh:.0f} | W60={W:>11,.0f} "
+          f"กันชน={r['worstV']:>6,.0f} | ทนการรบกวน: {'ครบทุกข้อ' if rob[i] else 'ไม่ครบ'}")
+survivors = [x for x, ok in zip(cand[:ROBN], rob) if ok]
+print(f"  ใน {ROBN} อันดับแรก มี {len(survivors)} แบบที่รอดครบทุกการรบกวน")
+pick = survivors[0]                # cand เรียงด้วย W60 อยู่แล้ว จึงเป็นแบบมั่งคั่งสูงสุดในกลุ่มที่ทนทาน
 W, A_P, A_R, A_F, A_G, n_ck, rho, r = pick
+# คู่เทียบของบทวิเคราะห์ความหลากหลาย: แบบที่ดีที่สุดในชุดเดียวกันที่ไม่มีไม้ผลเลย
+NOFRUIT = max((x for x in cand if x[3] == 0.0), key=lambda x: x[0], default=None)
 AH = a_house(n_ck)
 n, d1, dd = r["normal"], r["all"][(0,)], r["all"][(0, 1)]
 b = {sc: simulate(A_P, A_R, A_F, A_G, 0, 0.0, thR2, thG2, drought=sc) for sc in [(), (0,), (0, 1)]}
-print(f"\n  แบบแนะนำ (เกณฑ์รองในกลุ่ม 1%: มีไม้ผล > กันชน): {lab(A_P,A_R,A_F,A_G,AH)} + ไก่ {n_ck} + ปลา {rho:.0f}")
+print(f"\n  แบบแนะนำ (มั่งคั่งสูงสุดในบรรดาแบบที่ทนการรบกวนครบทุกข้อ): {lab(A_P,A_R,A_F,A_G,AH)} + ไก่ {n_ck} + ปลา {rho:.0f}")
 print(f"    I0={invest0(A_P,A_R,A_F,A_G):,.0f} | กันชนทุกฉาก={r['worstV']:,.0f}")
 for name, s, bs in (("ปกติ", n, b[()]), ("แล้งเดี่ยว", d1, b[(0,)]), ("แล้งซ้อน", dd, b[(0, 1)])):
     print(f"    {name:10s} W60={s['wealth']:>11,.0f} เงินสด={s['endM']:>11,.0f} ยุ้ง={s['S_end']:>5,.0f} กก. "
           f"(ไร้สัตว์ W60={bs['wealth']:>11,.0f}) ปลา {s['fish_ok']}/10 ฉก.{s['fish_emerg']} "
           f"ซื้อข้าว {s['rice_bought']:,.0f} กก./{s['buy_months']} ด. โปรตีน {s['protein_yr']:.0f} minV={s['minV']:,.0f}")
 print(f"    ไก่เข้า t={n['ck_entry']} | M สิ้นเม.ย.ปี1={n['M'][11]:,.0f} | minM={n['minM']:,.0f}")
-import farm_model as MV
 ck, fr, sv = MV.P_EGG, MV.P_FISH, MV.SALVAGE
 MV.P_EGG = MV.P_FISH = MV.SALVAGE = 0.0
 c_n = simulate(A_P, A_R, A_F, A_G, n_ck, rho, thR2, thG2)
@@ -162,28 +209,36 @@ J["recommended"] = dict(areas=[A_P, A_R, A_F, A_G], AH=AH, n_ck=n_ck, rho=rho,
 
 print()
 print("=" * 104)
-print("S4 | frontier ขนาดสระ ภายใต้เงื่อนไขครบทุกข้อ (ใช้สร้างรูปที่ 6 ของรายงาน)")
+print("S4 | frontier ขนาดสระ ภายใต้เงื่อนไขครบทุกข้อ C1-C11 และต้องทนการรบกวนครบ")
 print("=" * 104)
 rows = []
-for ip in range(2, 14):
+for ip in range(2, 19):
     A_P = ip * 160.0
-    top = None
-    for n_ck in (40, 60):
+    pool_p = []
+    for n_ck in (10, 20, 30, 40, 50, 60):
         AH = a_house(n_ck)
         for A_G in (1280.0, 1440.0, 1600.0):
-            for A_F in (0.0, 320.0, 640.0, 960.0, 1280.0):
+            for A_F in (320.0, 640.0, 960.0, 1280.0):      # C11 ไม้ผลอย่างน้อย 5%
                 A_R = TOTAL - AH - A_P - A_G - A_F
+                if not feed_self_reliant(A_R, n_ck):
+                    continue
                 if A_R < 1600 or invest0(A_P, A_R, A_F, A_G) > BUDGET:
                     continue
                 for rho in (1.0, 2.0):
                     r = evaluate(A_P, A_R, A_F, A_G, n_ck, rho, thR2, thG2)
                     if r is None:
                         continue
-                    n = r["normal"]
-                    if n["protein_yr"] < 80 or n["buy_months"] > 0:
+                    nn = r["normal"]
+                    if nn["protein_yr"] < 80 or nn["buy_months"] > 0 or r["worstV"] < 150:
                         continue
-                    if top is None or n["wealth"] > top[0]:
-                        top = (n["wealth"], A_R, A_F, A_G, n_ck, rho, r["worstV"])
+                    pool_p.append((nn["wealth"], A_R, A_F, A_G, n_ck, rho, r["worstV"]))
+    # ไล่จากแบบที่มั่งคั่งที่สุดลงมา เอาแบบแรกที่ทนการรบกวนครบทุกข้อ
+    pool_p.sort(key=lambda x: -x[0])
+    top = None
+    for candp in pool_p:                                # ไม่จำกัดจำนวน กันการตัดคำตอบทิ้งโดยไม่ตั้งใจ
+        if survives_all((A_P, candp[1], candp[2], candp[3]), candp[4], candp[5], thR2, thG2):
+            top = candp
+            break
     if top:
         rows.append((A_P,) + top)
         W_, A_R, A_F, A_G, n_ck, rho, wv = top
@@ -194,46 +249,71 @@ J["pond_frontier"] = [dict(pond=p, W=w, rice=r_, fruit=f, veg=g, n=nc, rho=rh, w
 
 print()
 print("=" * 104)
-print("S5 | ความทนต่อการรบกวนข้อสมมติ: เทียบแบบมีไม้ผลกับแบบไม่มีไม้ผล (ตารางที่ 9 ของรายงาน)")
+print("S5 | ราคาของความหลากหลาย: แบบที่ดีที่สุดในแต่ละระดับไม้ผล เมื่อบังคับให้ทนการรบกวนครบทุกข้อ")
 print("=" * 104)
-D2 = dict(name="ไม่มีไม้ผล (สระ30 นา43.4)", a=(1920.0, 2780.0, 0.0, 1600.0), n=40)
-D3 = dict(name="มีไม้ผล 15% (สระ22.5 นา35.9)", a=(1440.0, 2300.0, 960.0, 1600.0), n=40)
+# หาแบบที่ดีที่สุดของแต่ละระดับไม้ผล โดยไม่ใช้ C11 เพื่อวัดว่าการยืนยันเก็บไม้ผลมีราคาเท่าไร
+lvl = {}
+for n_ck in (10, 20, 30, 40, 50, 60):
+    AH = a_house(n_ck)
+    for ip in range(4, 20):
+        A_P = ip * 160.0
+        for A_G in (1280.0, 1440.0, 1600.0):
+            for A_F in (0.0, 320.0, 640.0, 960.0, 1280.0):
+                A_R = TOTAL - AH - A_P - A_G - A_F
+                if not feed_self_reliant(A_R, n_ck):
+                    continue
+                if A_R < 1600 or invest0(A_P, A_R, A_F, A_G) > BUDGET:
+                    continue
+                for rho in (1.0, 2.0):
+                    r = evaluate(A_P, A_R, A_F, A_G, n_ck, rho, thR2, thG2)
+                    if r is None:
+                        continue
+                    nn = r["normal"]
+                    if nn["protein_yr"] < 80 or nn["buy_months"] > 0 or r["worstV"] < 150:
+                        continue
+                    k = round(A_F / TOTAL * 100)
+                    if k in lvl and nn["wealth"] <= lvl[k][0]:
+                        continue
+                    if survives_all((A_P, A_R, A_F, A_G), n_ck, rho, thR2, thG2):
+                        lvl[k] = (nn["wealth"], A_P, A_R, A_F, A_G, n_ck, rho, r["worstV"])
+top_lvl = max(v[0] for v in lvl.values())
+print(f"  {'ไม้ผล':>6} {'W60 ปกติ':>12} {'สระ%':>6} {'นา%':>6} {'ผัก%':>6} {'ไก่':>4} {'กันชน':>7} {'ราคาที่จ่าย':>12}")
+J["diversity_levels"] = {}
+for k in sorted(set(list(lvl) + [0, 5, 10, 15, 20])):
+    if k not in lvl:
+        print(f"  {k:5d}% {'ไม่มีแบบที่ทนการรบกวนครบทุกข้อ':>46s}")
+        J["diversity_levels"][k] = None
+        continue
+    W_, P_, R_, F_, G_, nc_, rh_, wv_ = lvl[k]
+    print(f"  {k:5d}% {W_:12,.0f} {P_/64:6.1f} {R_/64:6.1f} {G_/64:6.1f} {nc_:4d} {wv_:7,.0f} {W_-top_lvl:12,.0f}")
+    J["diversity_levels"][k] = dict(W=W_, areas=[P_, R_, F_, G_], n=nc_, rho=rh_, worstV=wv_, cost=W_ - top_lvl)
 
-def robust(d, kp=None, c=None, rainf=1.0):
-    """ตรวจว่าการออกแบบยังรอดครบ 10 ฉากหรือไม่ เมื่อรบกวนข้อสมมติฝั่งดี"""
-    old = (MV.KP, MV.RUNOFF_C, list(MV.RAIN_N), list(MV.RAIN_D))
-    if kp: MV.KP = kp
-    if c is not None: MV.RUNOFF_C = c
-    if rainf != 1.0:
-        MV.RAIN_N[:] = [x * rainf for x in old[2]]
-        MV.RAIN_D[:] = [x * rainf for x in old[3]]
-    wv, ok = 1e9, True
-    for sc in SCEN10:
-        s = simulate(*d["a"], d["n"], 2.0, thR2, thG2, drought=sc)
-        if not s["feasible"]: ok = False
-        if sc: wv = min(wv, s["minV"])
-    MV.KP, MV.RUNOFF_C = old[0], old[1]
-    MV.RAIN_N[:], MV.RAIN_D[:] = old[2], old[3]
-    return ok, wv
-
-PERTS = [("ฐาน (kp=0.70, c=0.30)", {}), ("kp=0.75", dict(kp=0.75)), ("kp=0.80", dict(kp=0.80)),
-         ("c=0.25", dict(c=0.25)), ("c=0.20", dict(c=0.20)), ("ฝนทุกเดือน -10%", dict(rainf=0.9))]
+_RC = J["recommended"]
+_RA = tuple(_RC["areas"])
+_p = lambda a: f"สระ{a[0]/TOTAL*100:.1f} นา{a[1]/TOTAL*100:.1f}"
+D3 = dict(name=f"แบบแนะนำ ไม้ผล {_RA[2]/TOTAL*100:.0f}% ({_p(_RA)})",
+          a=_RA, n=int(_RC["n_ck"]), rho=_RC["rho"])
+_nf = lvl.get(0)
+D2 = dict(name=f"ไม่มีไม้ผล ({_p((_nf[1], _nf[2]))})",
+          a=(_nf[1], _nf[2], _nf[3], _nf[4]), n=_nf[5], rho=_nf[6])
 J["diversity"] = {}
-print(f"  {'การรบกวน':28s} | {D2['name']:>28s} | {D3['name']:>30s}")
+J["diversity_designs"] = dict(nofruit=D2["name"], rec=D3["name"],
+    nofruit_a=list(D2["a"]) + [D2["n"], D2["rho"]], rec_a=list(D3["a"]) + [D3["n"], D3["rho"]])
+print()
+print(f"  {'การรบกวน':22s} | {D2['name']:>26s} | {D3['name']:>34s}")
 for name, kw in PERTS:
-    o2, w2 = robust(D2, **kw)
-    o3, w3 = robust(D3, **kw)
-    J["diversity"][name] = dict(d2_ok=o2, d2_wv=(None if w2 > 1e8 else w2),
-                                d3_ok=o3, d3_wv=(None if w3 > 1e8 else w3))
-    f = lambda o, w: (f"รอด กันชน {w:5.0f}" if o else "ไม่รอด")
-    print(f"  {name:28s} | {f(o2,w2):>28s} | {f(o3,w3):>30s}")
+    o2, w2 = robust(D2["a"], D2["n"], D2["rho"], thR2, thG2, **kw)
+    o3, w3 = robust(D3["a"], D3["n"], D3["rho"], thR2, thG2, **kw)
+    J["diversity"][name] = dict(d2_ok=o2, d2_wv=w2, d3_ok=o3, d3_wv=w3)
+    f = lambda o, w: (f"รอด กันชน {w:5.0f}" if o else "ล่ม")
+    print(f"  {name:22s} | {f(o2,w2):>26s} | {f(o3,w3):>34s}")
 
 print()
 print("=" * 104)
-print("S6 | ทางเลือกจ้างแรงงาน: ถอดเงื่อนไขทำเองได้ออก (หัวข้อ 6.5 ของรายงาน)")
+print("S6 | ทางเลือกจ้างแรงงาน: ถอดเฉพาะ C9 เพดานแรงงาน เงื่อนไขคุณค่าอื่นคงไว้ทั้งหมด")
 print("=" * 104)
 best = None
-for n_ck in (40, 60):
+for n_ck in (10, 20, 30, 40, 50, 60):
     AH = a_house(n_ck)
     for ip in range(2, 14):
         A_P = ip * 160.0
@@ -241,6 +321,10 @@ for n_ck in (40, 60):
             A_R = ir * 160.0
             for A_F in (0.0, 320.0, 640.0, 960.0):
                 A_G = TOTAL - AH - A_P - A_R - A_F
+                # ถอดเฉพาะ C9 (เพดานแรงงาน) เงื่อนไขคุณค่าอื่นยังอยู่ครบ
+                # จึงเทียบกับแบบแนะนำได้อย่างเป็นธรรม
+                if A_F < 320.0 or not feed_self_reliant(A_R, n_ck):
+                    continue
                 if A_G < 0 or A_R < 1600 or invest0(A_P, A_R, A_F, A_G) > BUDGET:
                     continue
                 for rho in (1.0, 2.0):
@@ -314,6 +398,12 @@ cross = (below[-1] + 1) if below else 0
 print(f"  จุดตัด: เส้นโค้งอายุแซงโปรไฟล์ตารางที่เดือนที่ {cross+1} (ปีที่ {cross//12+1})")
 J["longrun"]["cross_month"] = cross + 1
 J["longrun"]["traj2"] = dict(flat=Wser(sf), curve_gate_d3=Wser(sc_), hard_gate=Wser(sh), hard_nogate=Wser(shx))
+# กรณีไม่มีเกณฑ์ปลูกไม้ผล น้ำยังพอ แต่เงินสดติดลบ คือผิดเงื่อนไข C6 ไม่ใช่ขาดน้ำ
+_negm = [i + 1 for i, m in enumerate(shx["M"]) if m < 0]
+J["longrun"]["nogate"] = dict(feasible=shx["feasible"], minM=shx["minM"], minV=shx["minV"],
+                              neg_months=_negm)
+print(f"  ไม่มีเกณฑ์ปลูกไม้ผล (แล้งหนัก): รอด={shx['feasible']} เงินสดต่ำสุด {shx['minM']:,.0f} บาท "
+      f"ติดลบเดือนที่ {_negm} | น้ำต่ำสุด {shx['minV']:,.0f} ลบ.ม.")
 
 with open("out/v3_results.json", "w") as fp:
     json.dump(J, fp, ensure_ascii=False)

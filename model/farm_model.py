@@ -17,6 +17,8 @@
     * น้ำครัวเรือนคิดตามจำนวนคน 12,800 ล./เดือน ไม่ผูกกับขนาดโซน
     * กติกา "กินก่อน เหลือจึงขาย" ใช้กับข้าว ไข่ และปลา
     * ค่าคงตัวที่มีช่วงความไม่แน่นอนเลือกขอบที่เป็นคุณต่อปริมาณน้ำ (k_p=0.70, c=0.30)
+    * สมดุลน้ำรักษาการอนุรักษ์มวล ฝนที่ตกบนแปลงถูกใช้ครั้งเดียว คือให้พืชใช้ก่อน
+      แล้วส่วนเกินจึงไหลลงสระตามสัมประสิทธิ์น้ำท่า c ไม่นับซ้ำทั้งสองทาง
 
 ระดับของแบบจำลองเลือกได้จากอาร์กิวเมนต์ของ simulate()
     thR=thG=0 และ w_rice=180  ->  M1  การจัดสรรคงที่ พฤติกรรมคงที่
@@ -35,6 +37,9 @@ EVAP_D = [180, 170, 170, 180, 160, 150, 130, 120, 120, 140, 160, 170]
 
 TOTAL, BUDGET, DEPTH = 6400.0, 200_000.0, 3.0
 KP, RUNOFF_C = 0.70, 0.30
+# สัมประสิทธิ์เกษตรหมุนเวียน แยกออกมาเป็นค่าคงตัวเพื่อให้การวิเคราะห์ความไวปรับได้
+AC_HI, AC_LO = 0.30, 0.10        # ส่วนลดค่าอาหารไก่ เมื่อยุ้งเบิกได้ / เมื่อเบิกไม่ได้
+AF_BASE, AF_SLOPE = 0.15, 0.35   # ส่วนลดค่าอาหารปลา = AF_BASE + AF_SLOPE*min(1, n/100)
 RICE = dict(cost=15.0, rev=45.0, water=180.0)   # M1 ใช้ 180; M2+ ใช้ W_RICE_AWD
 FRUIT = dict(cost=40.0, rev=65.0, water=90.0)
 VEG = dict(cost=25.0, rev=80.0, water=120.0)
@@ -147,12 +152,12 @@ def simulate(A_P, A_R, A_F, A_G, n_ck=0, rho=0.0, thR=0.0, thG=0.0,
             k_run = (5 - m) % 12 + 1              # เดือนที่คนต้องกินจนถึงเก็บเกี่ยวหน้า (รวมเดือนนี้)
             if S >= draw + k_run * HH_RICE_MO:    # ไก่เบิกได้เฉพาะส่วนเกินแท้จริง (คนก่อนเสมอ)
                 S -= draw
-                aC = 0.30
+                aC = AC_HI
             else:
-                aC = 0.10
+                aC = AC_LO
             M -= CK_FEED * n_ck * (1 - aC)
         if fish_left > 0:
-            aF = 0.15 + (0.35 * min(1.0, n_ck / 100.0) if has_ck else 0.0)
+            aF = AF_BASE + (AF_SLOPE * min(1.0, n_ck / 100.0) if has_ck else 0.0)
             M -= (FISH_FEED / 6.0) * fish_rho * A_P * (1 - aF)
         # ---- สมดุลน้ำ
         need = A_R * max(0.0, w_rice - R) if (rice_on and m in RICE_M) else 0.0
@@ -160,7 +165,14 @@ def simulate(A_P, A_R, A_F, A_G, n_ck=0, rho=0.0, thR=0.0, thG=0.0,
         need += A_G * max(0.0, VEG["water"] - R) if veg_left > 0 else 0.0
         need += HOUSE_WATER_MO
         need += CK_WATER * n_ck if has_ck else 0.0
-        V = min(V + R * (A_P + RUNOFF_C * (A_R + A_F + A_G)) - KP * E * A_P - need, v_max)
+        # น้ำท่าคิดจาก "ส่วนเกิน" ของฝนหลังหักที่พืชใช้ได้ในเดือนนั้นเท่านั้น
+        # ฝนหนึ่งหน่วยจึงถูกใช้ครั้งเดียว ไม่นับซ้ำทั้งที่รากพืชและที่สระ
+        # แปลงที่ไม่ได้เพาะปลูกในเดือนนั้นถือว่าฝนทั้งหมดเป็นส่วนเกิน
+        sur_R = max(0.0, R - w_rice) if (rice_on and m in RICE_M) else R
+        sur_F = max(0.0, R - FRUIT["water"]) if fruit_on else R
+        sur_G = max(0.0, R - VEG["water"]) if veg_left > 0 else R
+        runoff = RUNOFF_C * (sur_R * A_R + sur_F * A_F + sur_G * A_G)
+        V = min(V + R * A_P + runoff - KP * E * A_P - need, v_max)
         # ---- ปลายเดือน: ปลา/เก็บเกี่ยว/ไข่
         if fish_left > 0:
             ev["fish_active"].append(t)
